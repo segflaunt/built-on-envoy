@@ -6,16 +6,19 @@
 package e2e
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"net"
 	"net/http"
 	"net/rpc"
 	"net/rpc/jsonrpc"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -41,7 +44,8 @@ func TestDebugLocalComposer(t *testing.T) {
 	extensionDir, err := filepath.Abs("../../extensions/composer/example")
 	require.NoError(t, err)
 	sourceFile := filepath.Join(extensionDir, "example.go")
-	const sourceLine = 36 // First line in the body of example.(*Plugin).OnRequestHeaders
+	// First line in the body of example.(*Plugin).OnRequestHeaders.
+	sourceLine := lineOf(t, sourceFile, `p.handle.Log(shared.LogLevelInfo, "Example plugin: OnRequestHeaders called")`)
 
 	ports := internaltesting.FreePorts(t, 3)
 	proxyPort, adminPort, dlvPort := ports[0], ports[1], ports[2]
@@ -144,7 +148,8 @@ func TestDebugLocalRust(t *testing.T) {
 	extensionDir, err := filepath.Abs("../../extensions/ip-restriction")
 	require.NoError(t, err)
 	sourceFile := filepath.Join(extensionDir, "src", "lib.rs")
-	const sourceLine = 144 // First statement in Filter::on_request_headers
+	// First statement in Filter::on_request_headers.
+	sourceLine := lineOf(t, sourceFile, "let downstream_addr = envoy_filter")
 
 	ports := internaltesting.FreePorts(t, 3)
 	proxyPort, adminPort, debugPort := ports[0], ports[1], ports[2]
@@ -202,6 +207,26 @@ func TestDebugLocalRust(t *testing.T) {
 			t.Fatalf("session %d: request did not complete after detaching", session)
 		}
 	}
+}
+
+// lineOf returns the number of the only line in the given file that contains the given text, so breakpoints
+// can be set by line without hardcoding line numbers that change when the source is edited.
+func lineOf(t *testing.T, file, text string) int {
+	t.Helper()
+	f, err := os.Open(file) //nolint:gosec // test file
+	require.NoError(t, err)
+	defer func() { _ = f.Close() }()
+	line := 0
+	scanner := bufio.NewScanner(f)
+	for n := 1; scanner.Scan(); n++ {
+		if strings.Contains(scanner.Text(), text) {
+			require.Zero(t, line, "%q found more than once in %s", text, file)
+			line = n
+		}
+	}
+	require.NoError(t, scanner.Err())
+	require.NotZero(t, line, "%q not found in %s", text, file)
+	return line
 }
 
 // listeningExe returns the path of the executable of the process listening on the given TCP port.
