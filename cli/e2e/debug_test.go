@@ -19,6 +19,8 @@ import (
 	"testing"
 	"time"
 
+	gopsnet "github.com/shirou/gopsutil/v4/net"
+	"github.com/shirou/gopsutil/v4/process"
 	"github.com/stretchr/testify/require"
 
 	internaltesting "github.com/tetratelabs/built-on-envoy/internal/testing"
@@ -154,6 +156,9 @@ func TestDebugLocalRust(t *testing.T) {
 		"--config", `{"deny_addresses":["192.168.1.50"]}`,
 	)
 	internaltesting.RequireEventuallyGet(t, fmt.Sprintf("http://localhost:%d/ready", adminPort), internaltesting.EqualStatus(http.StatusOK))
+	// Create the target with the Envoy binary before connecting, as IDEs do. Without it, LLDB does not load
+	// the shared libraries of the process when connected to gdbserver, and breakpoints are never resolved.
+	envoyPath := listeningExe(t, proxyPort)
 
 	url := fmt.Sprintf("http://localhost:%d/status/200", proxyPort)
 	for session := range 2 {
@@ -176,6 +181,7 @@ func TestDebugLocalRust(t *testing.T) {
 
 		ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 		out, err := exec.CommandContext(ctx, lldb, "--batch", //nolint:gosec // test command
+			"-o", "target create "+envoyPath,
 			"-o", "gdb-remote 127.0.0.1:"+strconv.Itoa(debugPort),
 			"-o", fmt.Sprintf("breakpoint set -f %s -l %d", sourceFile, sourceLine),
 			"-o", "continue",
@@ -196,6 +202,24 @@ func TestDebugLocalRust(t *testing.T) {
 			t.Fatalf("session %d: request did not complete after detaching", session)
 		}
 	}
+}
+
+// listeningExe returns the path of the executable of the process listening on the given TCP port.
+func listeningExe(t *testing.T, port int) string {
+	t.Helper()
+	conns, err := gopsnet.ConnectionsWithContext(t.Context(), "tcp")
+	require.NoError(t, err)
+	for _, c := range conns {
+		if c.Status == "LISTEN" && c.Laddr.Port == uint32(port) && c.Pid != 0 { //nolint:gosec // port fits in uint32
+			p, err := process.NewProcessWithContext(t.Context(), c.Pid)
+			require.NoError(t, err)
+			exe, err := p.ExeWithContext(t.Context())
+			require.NoError(t, err)
+			return exe
+		}
+	}
+	require.FailNowf(t, "process not found", "no process listening on port %d", port)
+	return ""
 }
 
 // delveCallTimeout is how long to wait for a Delve API call to complete.
