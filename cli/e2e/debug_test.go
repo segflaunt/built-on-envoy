@@ -22,8 +22,6 @@ import (
 	"testing"
 	"time"
 
-	gopsnet "github.com/shirou/gopsutil/v4/net"
-	"github.com/shirou/gopsutil/v4/process"
 	"github.com/stretchr/testify/require"
 
 	internaltesting "github.com/tetratelabs/built-on-envoy/internal/testing"
@@ -126,23 +124,27 @@ func TestDebugLocalComposer(t *testing.T) {
 	}
 }
 
-// TestDebugLocalRust runs a Rust extension with `boe debug`, connects LLDB to the GDB remote debug server attached
-// to Envoy (as an IDE would do), sets a breakpoint by file and line in the extension source, and verifies the
+// TestDebugLocalRust runs a Rust extension with `boe debug`, connects a debugger to the GDB remote debug server
+// attached to Envoy (as an IDE would do), sets a breakpoint by file and line in the extension source, and verifies the
 // breakpoint is hit when a request is sent to Envoy. It connects twice to verify debuggers can reconnect, and
 // that Envoy keeps serving requests when no debugger is connected.
 func TestDebugLocalRust(t *testing.T) {
 	// internaltesting.MaybeSkipLongRunningTest(t)
-	lldb, err := exec.LookPath("lldb")
+	// LLDB is the native debugger on macOS. On Linux, LLDB cannot load the shared libraries of Envoy when connected
+	// to gdbserver, so breakpoints in extensions are never resolved: use GDB.
+	client := "lldb"
+	if runtime.GOOS == "linux" {
+		client = "gdb"
+		if _, err := exec.LookPath("gdbserver"); err != nil {
+			t.Skip("gdbserver is required to debug Rust extensions on Linux")
+		}
+	}
+	clientPath, err := exec.LookPath(client)
 	if err != nil {
-		t.Skip("lldb is required to connect to the debug server")
+		t.Skipf("%s is required to connect to the debug server", client)
 	}
 	if _, err = exec.LookPath("cargo"); err != nil {
 		t.Skip("cargo is required to build Rust extensions")
-	}
-	if runtime.GOOS == "linux" {
-		if _, err = exec.LookPath("gdbserver"); err != nil {
-			t.Skip("gdbserver is required to debug Rust extensions on Linux")
-		}
 	}
 
 	extensionDir, err := filepath.Abs("../../extensions/ip-restriction")
@@ -161,9 +163,31 @@ func TestDebugLocalRust(t *testing.T) {
 		"--config", `{"deny_addresses":["192.168.1.50"]}`,
 	)
 	internaltesting.RequireEventuallyGet(t, fmt.Sprintf("http://localhost:%d/ready", adminPort), internaltesting.EqualStatus(http.StatusOK))
-	// Create the target with the Envoy binary before connecting, as IDEs do. Without it, LLDB does not load
-	// the shared libraries of the process when connected to gdbserver, and breakpoints are never resolved.
-	envoyPath := listeningExe(t, proxyPort)
+
+	// Connect, set the breakpoint, continue until it is hit, print a function argument, and detach (quitting
+	// without detaching kills Envoy).
+	debugAddr := "127.0.0.1:" + strconv.Itoa(debugPort)
+	args := []string{"--batch",
+		"-o", "gdb-remote " + debugAddr,
+		"-o", fmt.Sprintf("breakpoint set -f %s -l %d", sourceFile, sourceLine),
+		"-o", "continue",
+		"-o", "frame variable _end_stream",
+		"-o", "detach",
+	}
+	want := []string{"stop reason = breakpoint 1.1", "on_request_headers", "_end_stream = true"}
+	if client == "gdb" {
+		args = []string{"-batch",
+			// Envoy runs on this host: read its files locally instead of through the debug server.
+			"-iex", "set sysroot /",
+			"-iex", "set debuginfod enabled off",
+			"-ex", "target remote " + debugAddr,
+			"-ex", fmt.Sprintf("break %s:%d", sourceFile, sourceLine),
+			"-ex", "continue",
+			"-ex", "print _end_stream",
+			"-ex", "detach",
+		}
+		want = []string{"hit Breakpoint 1, ", "on_request_headers", "= true"}
+	}
 
 	url := fmt.Sprintf("http://localhost:%d/status/200", proxyPort)
 	for session := range 2 {
@@ -185,19 +209,12 @@ func TestDebugLocalRust(t *testing.T) {
 		}()
 
 		ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
-		out, err := exec.CommandContext(ctx, lldb, "--batch", //nolint:gosec // test command
-			"-o", "target create "+envoyPath,
-			"-o", "gdb-remote 127.0.0.1:"+strconv.Itoa(debugPort),
-			"-o", fmt.Sprintf("breakpoint set -f %s -l %d", sourceFile, sourceLine),
-			"-o", "continue",
-			"-o", "frame variable _end_stream",
-			"-o", "detach",
-		).CombinedOutput()
+		out, err := exec.CommandContext(ctx, clientPath, args...).CombinedOutput() //nolint:gosec // test command
 		cancel()
 		require.NoError(t, err, "session %d: %s", session, out)
-		require.Contains(t, string(out), "stop reason = breakpoint 1.1", "session %d: %s", session, out)
-		require.Contains(t, string(out), "on_request_headers", "session %d: %s", session, out)
-		require.Contains(t, string(out), "_end_stream = true", "session %d: %s", session, out)
+		for _, w := range want {
+			require.Contains(t, string(out), w, "session %d: %s", session, out)
+		}
 
 		// After detaching, Envoy keeps running and the request completes.
 		select {
@@ -227,24 +244,6 @@ func lineOf(t *testing.T, file, text string) int {
 	require.NoError(t, scanner.Err())
 	require.NotZero(t, line, "%q not found in %s", text, file)
 	return line
-}
-
-// listeningExe returns the path of the executable of the process listening on the given TCP port.
-func listeningExe(t *testing.T, port int) string {
-	t.Helper()
-	conns, err := gopsnet.ConnectionsWithContext(t.Context(), "tcp")
-	require.NoError(t, err)
-	for _, c := range conns {
-		if c.Status == "LISTEN" && c.Laddr.Port == uint32(port) && c.Pid != 0 { //nolint:gosec // port fits in uint32
-			p, err := process.NewProcessWithContext(t.Context(), c.Pid)
-			require.NoError(t, err)
-			exe, err := p.ExeWithContext(t.Context())
-			require.NoError(t, err)
-			return exe
-		}
-	}
-	require.FailNowf(t, "process not found", "no process listening on port %d", port)
-	return ""
 }
 
 // delveCallTimeout is how long to wait for a Delve API call to complete.
