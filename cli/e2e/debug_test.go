@@ -28,7 +28,7 @@ import (
 // Envoy (as an IDE would do), sets a breakpoint by file and line in the extension source, and verifies the
 // breakpoint is hit when a request is sent to Envoy.
 func TestDebugLocalComposer(t *testing.T) {
-	internaltesting.MaybeSkipLongRunningTest(t)
+	// internaltesting.MaybeSkipLongRunningTest(t)
 	// boe builds its own Delve. Go extensions are debugged in a container on non-Linux platforms.
 	if runtime.GOOS != "linux" {
 		if err := exec.Command("docker", "info").Run(); err != nil {
@@ -125,7 +125,7 @@ func TestDebugLocalComposer(t *testing.T) {
 // breakpoint is hit when a request is sent to Envoy. It connects twice to verify debuggers can reconnect, and
 // that Envoy keeps serving requests when no debugger is connected.
 func TestDebugLocalRust(t *testing.T) {
-	internaltesting.MaybeSkipLongRunningTest(t)
+	// internaltesting.MaybeSkipLongRunningTest(t)
 	lldb, err := exec.LookPath("lldb")
 	if err != nil {
 		t.Skip("lldb is required to connect to the debug server")
