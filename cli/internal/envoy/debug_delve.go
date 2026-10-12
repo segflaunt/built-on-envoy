@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/bluekeyes/go-gitdiff/gitdiff"
 
@@ -35,9 +36,10 @@ const (
 
 // delveServer is a headless Delve server, used to debug Go extensions.
 type delveServer struct {
-	path string
-	port uint32
-	cmd  *exec.Cmd
+	path   string
+	port   uint32
+	cmd    *exec.Cmd
+	exited chan struct{} // closed when the dlv process exits
 }
 
 // newDelveServer returns a Delve server. Unless a dlv binary is explicitly configured, boe builds its own
@@ -74,22 +76,38 @@ func (s *delveServer) args(pid int) []string {
 	}
 }
 
-func (s *delveServer) start(runCtx, _ context.Context, logger *slog.Logger, pid int) error {
+func (s *delveServer) start(runCtx, ctx context.Context, logger *slog.Logger, pid int) error {
 	_, _ = fmt.Fprintf(os.Stderr, "🐞 %sAttaching Delve to Envoy (PID %d)...%s\n", internal.ANSIBold, pid, internal.ANSIReset)
 	var err error
 	if s.cmd, err = startDebugServer(runCtx, logger, "dlv", s.path, s.args(pid)); err != nil {
 		return err
 	}
-	if err = waitForTCPReady(net.JoinHostPort("127.0.0.1", strconv.FormatUint(uint64(s.port), 10)), debugServerReadyTimeout); err != nil {
-		stopDebugServer(logger, s.cmd)
+	s.exited = make(chan struct{})
+	go func() {
+		_ = s.cmd.Wait() // the only Wait call for this process
+		close(s.exited)
+	}()
+	// Stop waiting as soon as dlv exits (e.g. when it is not allowed to attach to Envoy) instead of waiting
+	// for the full timeout.
+	conn, err := dialWithRetry(ctx, net.JoinHostPort("127.0.0.1", strconv.FormatUint(uint64(s.port), 10)), debugServerReadyTimeout, s.exited)
+	if err != nil {
+		s.stop(logger)
 		return fmt.Errorf("delve did not become ready: %w", err)
 	}
+	_ = conn.Close()
 	_, _ = fmt.Fprintf(os.Stderr, "%s🐞 Delve is attached to Envoy and listening on 127.0.0.1:%d%s (dlv PID %d)\n",
 		internal.ANSIBold, s.port, internal.ANSIReset, s.cmd.Process.Pid)
 	return nil
 }
 
-func (s *delveServer) stop(logger *slog.Logger) { stopDebugServer(logger, s.cmd) }
+func (s *delveServer) stop(logger *slog.Logger) {
+	if s.cmd == nil || s.cmd.Process == nil {
+		return
+	}
+	logger.Debug("stopping debug server", "pid", s.cmd.Process.Pid)
+	_ = s.cmd.Process.Signal(syscall.SIGTERM)
+	<-s.exited
+}
 
 func (s *delveServer) connectHint() string { return fmt.Sprintf("dlv connect 127.0.0.1:%d", s.port) }
 

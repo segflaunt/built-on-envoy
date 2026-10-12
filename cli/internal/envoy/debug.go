@@ -12,7 +12,9 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -36,6 +38,9 @@ const (
 	// envoyProcessTimeout is how long to wait for the Envoy process to be found.
 	envoyProcessTimeout = 30 * time.Second
 )
+
+// ptraceScopeFile is the Yama ptrace scope setting on Linux. Overridable for testing.
+var ptraceScopeFile = "/proc/sys/kernel/yama/ptrace_scope"
 
 // debugServerReadyTimeout is how long to wait for the debug server to accept connections. Overridable for testing.
 var debugServerReadyTimeout = 60 * time.Second
@@ -83,6 +88,11 @@ type debugServer interface {
 // resolve finds (or builds) the debug server to use. It is called before starting Envoy to fail fast if the
 // debug server is not available.
 func (d *DebugOptions) resolve(ctx context.Context, logger *slog.Logger) error {
+	if runtime.GOOS == "linux" {
+		if err := checkPtraceScope(ptraceScopeFile, os.Geteuid()); err != nil {
+			return err
+		}
+	}
 	var err error
 	switch d.Debugger {
 	case DebuggerGDBRemote:
@@ -91,6 +101,22 @@ func (d *DebugOptions) resolve(ctx context.Context, logger *slog.Logger) error {
 		d.server, err = newDelveServer(ctx, d, logger)
 	}
 	return err
+}
+
+// checkPtraceScope checks that the Yama ptrace scope allows the debug server to attach to Envoy. The debug
+// server and Envoy are both children of boe, so the debug server is not an ancestor of Envoy and attaching
+// to it requires the classic ptrace permissions (scope 0) or CAP_SYS_PTRACE (scopes 1 and 2, assumed for root).
+func checkPtraceScope(file string, euid int) error {
+	content, err := os.ReadFile(file) //nolint:gosec // fixed system path
+	if err != nil {
+		return nil // Yama is not enabled
+	}
+	scope, err := strconv.Atoi(strings.TrimSpace(string(content)))
+	if err != nil || scope == 0 || (scope < 3 && euid == 0) {
+		return nil
+	}
+	return fmt.Errorf("the debugger cannot attach to Envoy: ptrace is restricted by %s (%d). "+
+		"Allow it with 'sudo sysctl -w kernel.yama.ptrace_scope=0', or run boe as root", file, scope)
 }
 
 // listenHost returns the host the debug server listens on.
@@ -140,16 +166,6 @@ func startDebugServer(ctx context.Context, logger *slog.Logger, name, path strin
 		return nil, fmt.Errorf("failed to start %s: %w", name, err)
 	}
 	return cmd, nil
-}
-
-// stopDebugServer stops a debug server, which detaches it from Envoy without killing it.
-func stopDebugServer(logger *slog.Logger, cmd *exec.Cmd) {
-	if cmd == nil || cmd.Process == nil {
-		return
-	}
-	logger.Debug("stopping debug server", "pid", cmd.Process.Pid)
-	_ = cmd.Process.Signal(syscall.SIGTERM)
-	_ = cmd.Wait()
 }
 
 // DebugNotesFromEnv returns the debug notes passed in the environment by the host boe process.

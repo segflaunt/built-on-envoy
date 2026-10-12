@@ -155,14 +155,18 @@ func TestDelveServerStartStop(t *testing.T) {
 }
 
 func TestDelveServerStartNotReady(t *testing.T) {
-	// A dlv that exits without listening never becomes ready.
+	// A dlv that exits without listening (e.g. when it cannot attach to Envoy) never becomes ready, and
+	// start fails as soon as it exits instead of waiting for the timeout.
 	dlv := filepath.Join(t.TempDir(), "dlv")
-	require.NoError(t, os.WriteFile(dlv, []byte("#!/bin/sh\nexit 0\n"), 0o700))    //nolint:gosec // test executable
+	require.NoError(t, os.WriteFile(dlv, []byte("#!/bin/sh\nexit 1\n"), 0o700))    //nolint:gosec // test executable
 	s := &delveServer{path: dlv, port: uint32(internaltesting.FreePorts(t, 1)[0])} //nolint:gosec // port fits in uint32
 	orig := debugServerReadyTimeout
-	debugServerReadyTimeout = time.Second
+	debugServerReadyTimeout = time.Minute
 	t.Cleanup(func() { debugServerReadyTimeout = orig })
-	require.ErrorContains(t, s.start(t.Context(), t.Context(), internaltesting.NewTLogger(t), 4321), "delve did not become ready")
+	started := time.Now()
+	err := s.start(t.Context(), t.Context(), internaltesting.NewTLogger(t), 4321)
+	require.ErrorContains(t, err, "delve did not become ready: debug server exited")
+	require.Less(t, time.Since(started), 30*time.Second)
 }
 
 func TestInstallDelve(t *testing.T) {

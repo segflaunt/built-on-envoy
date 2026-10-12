@@ -30,6 +30,41 @@ func TestFindExecutable(t *testing.T) {
 	require.ErrorContains(t, err, "not found")
 }
 
+func TestCheckPtraceScope(t *testing.T) {
+	dir := t.TempDir()
+	scopeFile := func(content string) string {
+		f := filepath.Join(dir, content)
+		require.NoError(t, os.WriteFile(f, []byte(content+"\n"), 0o600))
+		return f
+	}
+
+	tests := []struct {
+		name    string
+		file    string
+		euid    int
+		wantErr bool
+	}{
+		{"no yama", filepath.Join(dir, "missing"), 1000, false},
+		{"invalid", scopeFile("invalid"), 1000, false},
+		{"classic", scopeFile("0"), 1000, false},
+		{"restricted", scopeFile("1"), 1000, true},
+		{"restricted root", scopeFile("1"), 0, false},
+		{"admin only", scopeFile("2"), 1000, true},
+		{"admin only root", scopeFile("2"), 0, false},
+		{"no attach", scopeFile("3"), 0, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := checkPtraceScope(tt.file, tt.euid)
+			if tt.wantErr {
+				require.ErrorContains(t, err, "ptrace is restricted")
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
 func TestFindEnvoyPid(t *testing.T) {
 	// Start a child process that looks like Envoy (it has the --use-dynamic-base-id flag) and one that does not.
 	other := exec.Command("sleep", "30")
