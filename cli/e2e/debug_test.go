@@ -176,7 +176,8 @@ func TestDebugLocalRust(t *testing.T) {
 	var args, want []string
 	switch client {
 	case "gdb":
-		args = []string{"-batch",
+		args = []string{
+			"-batch",
 			// Envoy runs on this host: read its files locally instead of through the debug server.
 			"-iex", "set sysroot /",
 			"-iex", "set debuginfod enabled off",
@@ -188,7 +189,8 @@ func TestDebugLocalRust(t *testing.T) {
 		}
 		want = []string{"hit Breakpoint 1, ", "on_request_headers", "= true"}
 	default:
-		args = []string{"--batch",
+		args = []string{
+			"--batch",
 			"-o", "gdb-remote " + debugAddr,
 			"-o", fmt.Sprintf("breakpoint set -f %s -l %d", sourceFile, sourceLine),
 			"-o", "continue",
