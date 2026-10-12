@@ -207,7 +207,39 @@ When you are done, run `quit` and answer `n` when asked whether to kill the head
 The debug server stops Envoy when the debugger connects. Continue the execution after connecting (**Continue** in the
 IDE, or `continue` from the command line), and Envoy keeps serving requests until a breakpoint is hit.
 
-#### VS Code
+Use GDB on Linux and LLDB on macOS. On Linux, LLDB connected to `gdbserver` does not load the shared libraries of
+Envoy, so breakpoints in extensions stay pending and are never hit.
+
+Always detach from Envoy when you are done (**Disconnect** in the IDE, or `detach` from the command line). If the
+debugger quits without detaching, the debug server kills Envoy, and `boe debug` stops.
+
+#### VS Code on Linux
+
+Install the [C/C++](https://marketplace.visualstudio.com/items?itemName=ms-vscode.cpptools) extension and add a
+configuration to `.vscode/launch.json`:
+
+```json
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Attach to Envoy (boe debug, Rust)",
+      "type": "cppdbg",
+      "request": "launch",
+      "MIMode": "gdb",
+      "cwd": "${workspaceFolder}",
+      "program": "${env:HOME}/.local/share/boe/envoy-versions/1.38.0/bin/envoy",
+      "miDebuggerServerAddress": "127.0.0.1:2345"
+    }
+  ]
+}
+```
+
+Despite `"request": "launch"`, this connects to the running Envoy through the debug server: `program` is only used to
+load the symbols of the Envoy binary. `boe debug` prints the exact path of the Envoy binary it is running. It depends
+on the Envoy version and on the `boe` data directory (`BOE_DATA_HOME`).
+
+#### VS Code on macOS
 
 Install the [CodeLLDB](https://marketplace.visualstudio.com/items?itemName=vadimcn.vscode-lldb) extension and add an
 attach configuration to `.vscode/launch.json`:
@@ -240,7 +272,7 @@ requests and stops at your breakpoints. To continue automatically when attaching
 
 Create a **Remote Debug** run configuration (**Run → Edit Configurations… → + → Remote Debug**):
 
-- **Debugger:** the bundled LLDB or GDB.
+- **Debugger:** the bundled GDB on Linux, or the bundled LLDB on macOS.
 - **'target remote' args** (GDB) or **'process connect' URL** (LLDB): `127.0.0.1:2345` or `connect://127.0.0.1:2345`.
 - **Symbol file:** the debug build of the extension, for example `target/debug/libip_restriction.so` on Linux or
   `target/debug/libip_restriction.dylib` on macOS.
@@ -250,11 +282,21 @@ for details.
 
 #### Neovim
 
-With [nvim-dap](https://codeberg.org/mfussenegger/nvim-dap) and the CodeLLDB adapter, add a configuration that uses
-the same `processCreateCommands` as VS Code. nvim-dap also reads `.vscode/launch.json`, so the VS Code configuration
-works as well.
+With [nvim-dap](https://codeberg.org/mfussenegger/nvim-dap), use the CodeLLDB adapter on macOS, with the same
+`processCreateCommands` as VS Code, and GDB's built-in DAP support (`gdb -i dap`, GDB 14 or later) on Linux. nvim-dap
+also reads `.vscode/launch.json`, so the VS Code configurations work as well.
 
-#### LLDB and GDB CLI
+#### GDB and LLDB CLI
+
+On Linux, use GDB:
+
+```bash
+gdb -ex 'target remote 127.0.0.1:2345'
+(gdb) break /path/to/my-extension/src/lib.rs:144
+(gdb) continue
+```
+
+On macOS, use LLDB:
 
 ```bash
 lldb -o 'gdb-remote 127.0.0.1:2345'
@@ -262,9 +304,8 @@ lldb -o 'gdb-remote 127.0.0.1:2345'
 (lldb) continue
 ```
 
-On Linux, you can also use `gdb -ex 'target remote 127.0.0.1:2345'`. Use full source paths when setting breakpoints
-from the command line: file names alone may also match files with the same name in dependencies, such as the Envoy
-Rust SDK. When you are done, run `detach`: Envoy keeps running.
+Use full source paths when setting breakpoints from the command line: file names alone may also match files with the
+same name in dependencies, such as the Envoy Rust SDK. When you are done, run `detach`: Envoy keeps running.
 
 ## Caveats
 

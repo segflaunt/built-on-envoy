@@ -24,7 +24,8 @@ Go and Rust extensions can't be debugged in the same session. All other flags be
 - **Rust extensions** are debugged with the platform's native debug server, which speaks the GDB remote protocol:
   `gdbserver` on Linux (it must be installed), and LLDB's `debugserver` on macOS (from the Xcode Command Line Tools).
   The debug server is only attached to Envoy while a debugger is connected, so Envoy keeps running normally
-  between debug sessions and you can reconnect at any time.
+  between debug sessions and you can reconnect at any time. Connect with GDB on Linux and with LLDB on macOS:
+  LLDB can't resolve breakpoints in extensions when connected to `gdbserver`.
 
 <Callout type="note">
 Delve can only debug Go code loaded into a non-Go process on Linux. On other platforms, such as macOS,
@@ -77,7 +78,9 @@ Debug a Go extension using a custom port for the debug server:
 
 Once the debug server is listening, attach your IDE to `127.0.0.1:2345`: as a remote Delve session for Go
 extensions, or as a GDB remote (`gdb-remote`) session for Rust extensions. From the command line, use
-`dlv connect 127.0.0.1:2345` for Go, or `lldb -o 'gdb-remote 127.0.0.1:2345'` for Rust. See the
+`dlv connect 127.0.0.1:2345` for Go, or, for Rust, `gdb -ex 'target remote 127.0.0.1:2345'` on Linux and
+`lldb -o 'gdb-remote 127.0.0.1:2345'` on macOS. Run `detach` before quitting the debugger: quitting without
+detaching kills Envoy. See the
 [Debugging](/docs/debugging-extensions) guide for IDE configurations and caveats.
 
 

@@ -132,12 +132,17 @@ func TestDebugLocalRust(t *testing.T) {
 	// internaltesting.MaybeSkipLongRunningTest(t)
 	// LLDB is the native debugger on macOS. On Linux, LLDB cannot load the shared libraries of Envoy when connected
 	// to gdbserver, so breakpoints in extensions are never resolved: use GDB.
-	client := "lldb"
-	if runtime.GOOS == "linux" {
+	var client string
+	switch runtime.GOOS {
+	case "darwin":
+		client = "lldb"
+	case "linux":
 		client = "gdb"
 		if _, err := exec.LookPath("gdbserver"); err != nil {
 			t.Skip("gdbserver is required to debug Rust extensions on Linux")
 		}
+	default:
+		t.Skipf("unsupported OS: %s", runtime.GOOS)
 	}
 	clientPath, err := exec.LookPath(client)
 	if err != nil {
@@ -167,15 +172,10 @@ func TestDebugLocalRust(t *testing.T) {
 	// Connect, set the breakpoint, continue until it is hit, print a function argument, and detach (quitting
 	// without detaching kills Envoy).
 	debugAddr := "127.0.0.1:" + strconv.Itoa(debugPort)
-	args := []string{"--batch",
-		"-o", "gdb-remote " + debugAddr,
-		"-o", fmt.Sprintf("breakpoint set -f %s -l %d", sourceFile, sourceLine),
-		"-o", "continue",
-		"-o", "frame variable _end_stream",
-		"-o", "detach",
-	}
-	want := []string{"stop reason = breakpoint 1.1", "on_request_headers", "_end_stream = true"}
-	if client == "gdb" {
+
+	var args, want []string
+	switch client {
+	case "gdb":
 		args = []string{"-batch",
 			// Envoy runs on this host: read its files locally instead of through the debug server.
 			"-iex", "set sysroot /",
@@ -187,6 +187,15 @@ func TestDebugLocalRust(t *testing.T) {
 			"-ex", "detach",
 		}
 		want = []string{"hit Breakpoint 1, ", "on_request_headers", "= true"}
+	default:
+		args = []string{"--batch",
+			"-o", "gdb-remote " + debugAddr,
+			"-o", fmt.Sprintf("breakpoint set -f %s -l %d", sourceFile, sourceLine),
+			"-o", "continue",
+			"-o", "frame variable _end_stream",
+			"-o", "detach",
+		}
+		want = []string{"stop reason = breakpoint 1.1", "on_request_headers", "_end_stream = true"}
 	}
 
 	url := fmt.Sprintf("http://localhost:%d/status/200", proxyPort)

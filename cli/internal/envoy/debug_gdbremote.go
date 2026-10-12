@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -118,7 +119,14 @@ func (s *gdbRemoteServer) serve(ctx context.Context, logger *slog.Logger, pid in
 		if err != nil {
 			return // listener closed
 		}
-		if err = s.session(ctx, logger, pid, conn); err != nil {
+		err = s.session(ctx, logger, pid, conn)
+		if errors.Is(err, errEnvoyKilled) {
+			// Envoy is gone, so boe stops: there is nothing left to debug.
+			_, _ = fmt.Fprintf(os.Stderr, "%s⚠ Envoy was killed when the debugger disconnected: run 'detach' before quitting the debugger to keep Envoy running%s\n",
+				internal.ANSIBold, internal.ANSIReset)
+			return
+		}
+		if err != nil {
 			logger.Error("debug session failed", "error", err)
 			_, _ = fmt.Fprintf(os.Stderr, "%s⚠ Debug session failed: %v%s\n", internal.ANSIBold, err, internal.ANSIReset)
 		}
@@ -175,8 +183,29 @@ func (s *gdbRemoteServer) session(ctx context.Context, logger *slog.Logger, pid 
 
 	_, _ = fmt.Fprintf(os.Stderr, "%s🐞 Debugger connected, attached to Envoy (PID %d)%s\n", internal.ANSIBold, pid, internal.ANSIReset)
 	proxy(client, server)
+	// The debug server kills Envoy instead of detaching from it when the debugger quits without detaching.
+	// Wait for the debug server to exit to know which one happened.
+	cancel()
+	<-exited
+	if !processAlive(pid) {
+		return errEnvoyKilled
+	}
 	_, _ = fmt.Fprintf(os.Stderr, "%s🐞 Debugger disconnected, Envoy keeps running%s\n", internal.ANSIBold, internal.ANSIReset)
 	return nil
+}
+
+// errEnvoyKilled is returned when Envoy did not survive a debug session.
+var errEnvoyKilled = errors.New("envoy was killed by the debug server")
+
+// processAlive returns whether the process with the given pid is running. A terminated process that has not
+// been reaped by its parent yet (a zombie) is not alive.
+func processAlive(pid int) bool {
+	p, err := process.NewProcess(int32(pid)) //nolint:gosec // pid never overflows int32
+	if err != nil {
+		return false
+	}
+	status, err := p.Status()
+	return err != nil || !slices.Contains(status, process.Zombie)
 }
 
 // dialWithRetry connects to addr, retrying until it succeeds, the timeout elapses, the context is cancelled, or
@@ -226,10 +255,20 @@ func (s *gdbRemoteServer) stop(_ *slog.Logger) {
 }
 
 func (s *gdbRemoteServer) connectHint() string {
-	hint := fmt.Sprintf("lldb -o 'gdb-remote 127.0.0.1:%d'", s.port)
+	// LLDB cannot load the shared libraries of the process when connected to gdbserver on Linux, so breakpoints
+	// in extensions are never resolved: use GDB there.
 	if s.goos != "darwin" {
-		hint = fmt.Sprintf("gdb -ex 'target remote 127.0.0.1:%d'  or  %s", s.port, hint)
+		hint := fmt.Sprintf("gdb -ex 'target remote 127.0.0.1:%d'", s.port)
+		if s.envoyPath != "" {
+			hint += fmt.Sprintf(`
+  → %sVS Code (C/C++):%s "type": "cppdbg", "request": "launch", "MIMode": "gdb", "cwd": "${workspaceFolder}",
+                     "program": "%s",
+                     "miDebuggerServerAddress": "127.0.0.1:%d"`,
+				internal.ANSIBold, internal.ANSIReset, s.envoyPath, s.port)
+		}
+		return hint
 	}
+	hint := fmt.Sprintf("lldb -o 'gdb-remote 127.0.0.1:%d'", s.port)
 	if s.envoyPath != "" {
 		// CodeLLDB requires a target to attach: the Envoy binary.
 		hint += fmt.Sprintf(`
