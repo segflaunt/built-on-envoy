@@ -19,6 +19,7 @@ import (
 	"go.uber.org/mock/gomock"
 
 	"github.com/tetratelabs/built-on-envoy/extensions/composer/pkg"
+	"github.com/tetratelabs/built-on-envoy/extensions/composer/waf/logger"
 )
 
 // metricsTestDirectives block the requests carrying "X-Block-Test: block-me" in phase 1.
@@ -84,7 +85,7 @@ func driveRequest(t *testing.T, factory shared.HttpFilterFactory, h shared.HttpF
 	return status
 }
 
-func Test_ParseMetricsConfig(t *testing.T) {
+func Test_ParseConfigMetrics(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		config string
@@ -98,9 +99,9 @@ func Test_ParseMetricsConfig(t *testing.T) {
 		{"other top-level keys are not checked here", `{"mode": "FULL", "unknown": 1}`, authorityLabel{}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg, err := parseMetricsConfig([]byte(tc.config))
+			cfg, err := parseConfig([]byte(tc.config), logger.GetLogger())
 			require.NoError(t, err)
-			require.Equal(t, tc.want, cfg.authority)
+			require.Equal(t, tc.want, cfg.metrics.authority)
 		})
 	}
 
@@ -116,7 +117,7 @@ func Test_ParseMetricsConfig(t *testing.T) {
 		{"authority_literal is not a setting", `{"metrics": {"authority_literal": "shop"}}`, []string{"invalid metrics", "authority_literal"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := parseMetricsConfig([]byte(tc.config))
+			_, err := parseConfig([]byte(tc.config), logger.GetLogger())
 			require.Error(t, err)
 			for _, want := range tc.wantErr {
 				require.ErrorContains(t, err, want)
