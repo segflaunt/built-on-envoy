@@ -21,11 +21,12 @@ const (
 	labelSourceVirtualHostName
 )
 
-// labelSources maps the values of metrics.label_source to their label source.
-var labelSources = map[string]labelSource{
-	"authority":         labelSourceAuthority,
-	"route_name":        labelSourceRouteName,
-	"virtual_host_name": labelSourceVirtualHostName,
+// authorityLabels maps the values of metrics.authority_label to the authority tag they configure.
+var authorityLabels = map[string]authorityLabel{
+	"authority":         {source: labelSourceAuthority},
+	"route_name":        {source: labelSourceRouteName},
+	"virtual_host_name": {source: labelSourceVirtualHostName},
+	"none":              {disabled: true},
 }
 
 // unresolvedLabel is the value of the authority tag when the label source has no value for the
