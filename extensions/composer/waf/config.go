@@ -8,7 +8,10 @@ package waf
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 
 	"go.uber.org/zap"
@@ -107,7 +110,8 @@ func parseMetrics(raw json.RawMessage) (metricsConfig, error) {
 		return cfg, nil
 	}
 	var m struct {
-		AuthorityLabel *bool `json:"authority_label"`
+		AuthorityLabel *bool   `json:"authority_label"`
+		LabelSource    *string `json:"label_source"`
 	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
@@ -117,6 +121,17 @@ func parseMetrics(raw json.RawMessage) (metricsConfig, error) {
 
 	if m.AuthorityLabel != nil && !*m.AuthorityLabel {
 		cfg.authority.disabled = true
+	}
+	if m.LabelSource != nil {
+		src, ok := labelSources[*m.LabelSource]
+		if !ok {
+			names := slices.Sorted(maps.Keys(labelSources))
+			return metricsConfig{}, fmt.Errorf("invalid metrics: metrics.label_source %q is not one of %s", *m.LabelSource, strings.Join(names, ", "))
+		}
+		if src != labelSourceAuthority && cfg.authority.disabled {
+			return metricsConfig{}, errors.New("invalid metrics: metrics.label_source is set but metrics.authority_label is false")
+		}
+		cfg.authority.source = src
 	}
 	return cfg, nil
 }

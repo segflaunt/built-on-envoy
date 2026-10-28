@@ -97,6 +97,19 @@ func Test_ParseConfigMetrics(t *testing.T) {
 		{"authority_label true is the header", `{"metrics": {"authority_label": true}}`, authorityLabel{}},
 		{"authority_label false", `{"metrics": {"authority_label": false}}`, authorityLabel{disabled: true}},
 		{"other top-level keys are not checked here", `{"mode": "FULL", "unknown": 1}`, authorityLabel{}},
+		{"label_source authority is the header", `{"metrics": {"label_source": "authority"}}`, authorityLabel{}},
+		{"label_source route_name", `{"metrics": {"label_source": "route_name"}}`, authorityLabel{source: labelSourceRouteName}},
+		{"label_source virtual_host_name", `{"metrics": {"label_source": "virtual_host_name"}}`, authorityLabel{source: labelSourceVirtualHostName}},
+		{
+			"label_source with authority_label true",
+			`{"metrics": {"label_source": "route_name", "authority_label": true}}`,
+			authorityLabel{source: labelSourceRouteName},
+		},
+		{
+			"label_source authority with authority_label false",
+			`{"metrics": {"label_source": "authority", "authority_label": false}}`,
+			authorityLabel{disabled: true},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg, err := parseConfig([]byte(tc.config), logger.GetLogger())
@@ -115,6 +128,17 @@ func Test_ParseConfigMetrics(t *testing.T) {
 		{"authority_label is not a boolean", `{"metrics": {"authority_label": "false"}}`, []string{"invalid metrics"}},
 		{"unknown key", `{"metrics": {"authority_lable": false}}`, []string{"invalid metrics", "authority_lable"}},
 		{"authority_literal is not a setting", `{"metrics": {"authority_literal": "shop"}}`, []string{"invalid metrics", "authority_literal"}},
+		{"label_source is not a string", `{"metrics": {"label_source": 1}}`, []string{"invalid metrics"}},
+		{
+			"unknown label_source",
+			`{"metrics": {"label_source": "host"}}`,
+			[]string{"metrics.label_source", `"host"`, "authority, route_name, virtual_host_name"},
+		},
+		{
+			"label_source with authority_label false",
+			`{"metrics": {"label_source": "route_name", "authority_label": false}}`,
+			[]string{"metrics.label_source", "metrics.authority_label"},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := parseConfig([]byte(tc.config), logger.GetLogger())
@@ -130,6 +154,8 @@ func Test_InvalidMetricsConfigRejectsFilterConfig(t *testing.T) {
 	for _, metrics := range []map[string]any{
 		{"authority_lable": false},
 		{"authority_literal": "shop"},
+		{"label_source": "host"},
+		{"label_source": "virtual_host_name", "authority_label": false},
 	} {
 		ctrl := gomock.NewController(t)
 		// No expectations: the filter config must be rejected before any metric is defined.
@@ -229,13 +255,64 @@ func Test_MetricsAuthorityLabelInternalBlock(t *testing.T) {
 	}{
 		{"header", metricsConfig{}, []any{"authority", "phase", "rule_id"}, []any{"attacker-1.example", phase, ""}},
 		{"authority_label false", metricsConfig{authority: authorityLabel{disabled: true}}, []any{"phase", "rule_id"}, []any{phase, ""}},
+		{
+			"label_source route_name",
+			metricsConfig{authority: authorityLabel{source: labelSourceRouteName}},
+			[]any{"authority", "phase", "rule_id"},
+			[]any{"rt-a", phase, ""},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctrl := gomock.NewController(t)
 			m := newMetrics(newMetricsTestConfigHandleTags(ctrl, tc.definedTags...), tc.cfg)
 			h := mocks.NewMockHttpFilterHandle(ctrl)
+			h.EXPECT().GetAttributeString(shared.AttributeIDXdsRouteName).Return(pkg.UnsafeBufferFromString("rt-a"), true).AnyTimes()
 			h.EXPECT().IncrementCounterValue(shared.MetricID(2), uint64(1), tc.wantTags...).Return(shared.MetricsSuccess)
 			m.RecordBlockInternal(h, "attacker-1.example", ctypes.PhaseRequestBody)
+		})
+	}
+}
+
+// Test_MetricsLabelSource checks the authority tag of waf_tx_blocked for each label source, through
+// a real filter and Coraza transaction: distinct client-chosen authorities share the series of their
+// route or virtual host, and a missing name is tagged unresolved.
+func Test_MetricsLabelSource(t *testing.T) {
+	blockedPhase := strconv.Itoa(int(ctypes.PhaseRequestHeaders))
+	withAuthority := []any{"authority", "phase", "rule_id"}
+	attribute := func(id shared.AttributeID, v string, ok bool) func(*mocks.MockHttpFilterHandle) {
+		return func(h *mocks.MockHttpFilterHandle) {
+			h.EXPECT().GetAttributeString(id).Return(pkg.UnsafeBufferFromString(v), ok).AnyTimes()
+		}
+	}
+	for _, tc := range []struct {
+		name     string
+		source   string
+		lookup   func(*mocks.MockHttpFilterHandle)
+		wantFrom string
+	}{
+		{"route_name", "route_name", attribute(shared.AttributeIDXdsRouteName, "rt-a", true), "rt-a"},
+		{"virtual_host_name", "virtual_host_name", attribute(shared.AttributeIDXdsVirtualHostName, "vh-a", true), "vh-a"},
+		{"route without a name", "route_name", attribute(shared.AttributeIDXdsRouteName, "", true), unresolvedLabel},
+		{"Envoy without the route attribute", "route_name", attribute(shared.AttributeIDXdsRouteName, "", false), unresolvedLabel},
+		{"virtual host without a name", "virtual_host_name", attribute(shared.AttributeIDXdsVirtualHostName, "", true), unresolvedLabel},
+		{"Envoy without the virtual host attribute", "virtual_host_name", attribute(shared.AttributeIDXdsVirtualHostName, "", false), unresolvedLabel},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			factory := newMetricsTestFactory(t, newMetricsTestConfigHandleTags(ctrl, withAuthority...),
+				map[string]any{"metrics": map[string]any{"label_source": tc.source}})
+			authorities := []string{"attacker-1.example", "attacker-2.example:8443", "10.1.2.3"}
+			h := newMetricsTestPluginHandle(ctrl)
+			tc.lookup(h)
+			h.EXPECT().IncrementCounterValue(shared.MetricID(2), uint64(1), tc.wantFrom, blockedPhase, "100001").
+				Return(shared.MetricsSuccess).Times(len(authorities))
+			for _, authority := range authorities {
+				status := driveRequest(t, factory, h, map[string][]string{
+					":authority":   {authority},
+					"x-block-test": {"block-me"},
+				})
+				require.Equal(t, shared.HeadersStatusStop, status)
+			}
 		})
 	}
 }
